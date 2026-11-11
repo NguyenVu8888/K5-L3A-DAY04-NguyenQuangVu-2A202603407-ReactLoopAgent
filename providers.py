@@ -1,8 +1,15 @@
 """Bốn provider cùng một interface. Không chứa agent loop."""
 import json
 import os
+import time
 import urllib.error
 import urllib.request
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 CONFIG = {
     'openai': ('OPENAI_API_KEY', 'https://api.openai.com/v1/chat/completions'),
@@ -14,14 +21,28 @@ CONFIG = {
 
 def post_json(url, headers, payload):
     req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json', **headers})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as response:
-            return json.load(response)
-    except urllib.error.HTTPError as exc:
-        # Do not print response bodies: they may contain account or request data.
-        raise RuntimeError(f'Provider trả HTTP {exc.code}; kiểm tra model, key và quota.') from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f'Không kết nối được provider: {exc.reason}') from exc
+    max_retries = 6
+    for attempt in range(max_retries):
+        try:
+            with urllib.request.urlopen(req, timeout=45) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 and attempt < max_retries - 1:
+                retry_after = exc.headers.get('Retry-After')
+                try:
+                    wait_seconds = int(retry_after) if retry_after else (2 ** attempt * 2 + 1)
+                except (ValueError, TypeError):
+                    wait_seconds = 2 ** attempt * 2 + 1
+                time.sleep(wait_seconds)
+                continue
+            # Do not print response bodies: they may contain account or request data.
+            raise RuntimeError(f'Provider trả HTTP {exc.code}; kiểm tra model, key và quota.') from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            if attempt < 3:
+                time.sleep(2 ** attempt + 1)
+                continue
+            reason = getattr(exc, 'reason', exc)
+            raise RuntimeError(f'Không kết nối được provider: {reason}') from exc
 
 
 class Provider:
